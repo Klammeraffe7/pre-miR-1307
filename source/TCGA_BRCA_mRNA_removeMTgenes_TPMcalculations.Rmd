@@ -1,0 +1,344 @@
+---
+title: "Conversion of TCGA BRCA raw readcounts to TPMs"
+author: "Birgitta"
+date: "`r format(Sys.time(), '%d.%m.%Y')`"
+output:
+  html_document:
+  toc: true
+  highlight: haddock
+editor_options: 
+  chunk_output_type: console
+---
+
+# Procedure
+
+* aim: calculation of TPM values from htseq read counts of TCGA data
+
+## Libraries, directories and functions
+```{r load libraries and functions, message=FALSE, warning=FALSE}
+### Libraries
+library(plyr)
+library(dplyr)
+library(data.table)
+library(openxlsx)
+library(matrixStats)
+library(stringr)
+library(edgeR)
+library(GenomicFeatures)
+library(RColorBrewer)
+
+#### Directories
+database_dir <- file.path(~, "database")
+data_dir <- file.path(~, "htseq_count_data")
+work_dir <- file.path(~, "TCGA_mRNA_batch_effects")
+res_dir <- file.path(~, "results")
+
+if(!dir.exists(res_dir)){dir.create(res_dir,recursive = TRUE)}
+
+# Functions
+# function for TPM calculation from gist.github: https://gist.github.com/slowkow/6e34ccb4d1311b8fe62e
+tpm <- function(counts, lengths) {
+  rate <- counts / lengths
+  rate <- na.omit(rate)
+  rate / sum(rate) * 1e6
+}
+
+# show first five columns and rows of a dataframe
+begindf <- function(x) {
+  if(ncol(x)>=8){
+    print(x[1:5, 1:8])
+  } else {
+    print(head(x))
+  }
+} 
+
+# make first column out of rownames
+make1col <- function(x) {
+  x <- cbind(rownames(x), data.frame(x, row.names = NULL))
+  colnames(x)[1] <- "ids"
+  return(x)
+}
+
+# make rownames out of first column
+makeRn <- function(x) {
+  rownames(x) <- x[, 1]
+  x[, 1] <- NULL
+  return(x)
+}
+```
+
+# Read data
+```{r readData}
+# confounders to be read from supplementary table of the manuscript
+# confounders <- fread(file.path(database_dir, "confounder_BRCA_mRNA_miRNA.csv"), sep= ";", dec= ",")
+confounders$id_samp <- str_sub(confounders$ids, start = 1, end = 19)
+# counts generated as output of the TCGA_mRNA_htseqcount_data.R script. Contains the ht-seq count mRNA sequencing results
+# provided by the GDC portal in one table.
+counts <- fread(file.path(data_dir, "htseq_count_TCGA-BRCA.csv"), sep = ";", dec = ",", data.table = FALSE )
+rownames(counts) <- counts$id
+```
+
+# Filter data 
+To obtain a clean dataset,data will be filtered to exclude unwanted parameters:
+
+* exclude 16 very variable expressed MT genes
+* only Tumor and Normal samples should be included, no Metastatic etc. 
+* only use female samples
+* only use samples with purity >40%
+* only use samples from plates with at least 8 patients
+
+###  Open pdf file for diagnostic graphs
+```{r pdf}
+# pdf(file.path(res_dir, "DiagnosticPlotsTPMconversion_wo_MTgenes.pdf"))
+```
+
+## Removal of MT genes
+In the course of the analysis, it appeared that 16  mitochondrial genes are crazily high expressed in some samples and in normal percentages in other samples. It is not quite clear why. In any case, excluding these genes should make TPMs more comparable between samples.  
+```{r Filter1}
+MT_genes <- c("MT-CO3", "MT-CO2", "MT-CO1", "MT-ND4", "MT-RNR2", "MT-ATP6", "MT-CYB", "MT-ND1", "MT-ND3", "MT-ND2", "MT-ATP8", "MT-ND4L", "MT-ND6", "MT-ND5", "MT-RNR1", "MT-TP")
+counts <- counts[!(counts$hgnc_symbol %in% MT_genes),]
+```
+
+## Overview on sequencing depth
+```{r seq_depth}
+seq_depth <- colSums(counts[,(3:ncol(counts))])
+
+hist(seq_depth,
+     xlab= "sequencing depth",
+     main = "Original sequencing depth", col = "darkorange", 
+     cex.lab = 1.5, cex.axis= 1.5)
+
+SampPerPlate <- sort(table(str_sub(colnames(counts[3:ncol(counts)]), start = -7, end = -4)))
+print(SampPerPlate)
+
+```
+
+## Tumour/Normal samples
+```{r Filter2}
+### exclude RecurrentSolidTumor(02), AdditionalNewPrimaryTumor(05), MetastaticTumor(06) and BloodDerivedNormal(10) from analysis
+TumNorm <- colnames(counts)[3:ncol(counts)]
+TumNorm <- TumNorm[grepl("^TCGA-.{2}-.{4}-01[A-Z]-.+$", TumNorm)| grepl("^TCGA-.{2}-.{4}-11[A-Z]-.+$", TumNorm)] 
+counts <- counts[, colnames(counts) %in% c(TumNorm, "id", "hgnc_symbol")]
+print(dim(counts))
+```
+
+## Female samples only
+```{r Filter3}
+female <- subset(confounders, gender == "female")
+counts <- counts[, str_sub(colnames(counts), end = 12) %in% c(female$sampleID, "id", "hgnc_symbol")]
+print(dim(counts))
+```
+
+## Exclude samples with purity < 40%
+```{r Filter4}
+confounders$purity <- as.factor(confounders$purity)
+confounders$Sample_Type <- as.factor(confounders$Sample_Type)
+pure <- subset(confounders, sample_type == "Tumor")
+pure <- subset(pure, purity == "0-10" | purity == "10-20" | purity == "20-30" | purity == "30-40") # get those that should be excluded, NA not excluded here 
+counts <- counts[, str_sub(colnames(counts), end = 15) %!in% c(pure$samp.ids)]
+print(dim(counts))
+```
+
+## Remove plates with less than 8 patients
+```{r Filter5}
+## Plate overview before removal
+SampPerPlate <- sort(table(str_sub(colnames(counts[3:ncol(counts)]), start = -7, end = -4)))
+print(SampPerPlate)
+barplot(SampPerPlate, col = "lightskyblue2", 
+        ylim = c(0,100),
+        las = 2, 
+        cex.axis = 1.5, cex.names = 0.5,
+        main  = paste0("number of samples per plate before filter"))
+abline(h=8, lty=5,  lwd= 3, col = "darkblue")
+
+### remove plates with only very few patients 
+rm_plates <- c(names(SampPerPlate[SampPerPlate<=8]), "A277") # plate A277 contains 5 samples in duplicates, mostly having rather low sequencing depth. All of these 5 samples were additionally sequenced on a different plate. Therefore, these poorly sequenced samples are removed.
+print(rm_plates)
+for(j in 1:length(rm_plates)){
+  counts = counts[,!(grepl(rm_plates[j], str_sub(colnames(counts), start = -7, end = -4)))]
+}
+print(dim(counts))
+
+## Plate overview before removal
+SampPerPlate <- sort(table(str_sub(colnames(counts[3:ncol(counts)]), start = -7, end = -4)))
+print(SampPerPlate)
+barplot(SampPerPlate, col = "lightskyblue2", 
+        ylim = c(0,100),
+        las = 2, 
+        cex.axis = 1.5, cex.names = 0.5,
+        main  = paste0("number of samples per plate after filter"))
+abline(h=8, lty=5,  lwd= 3, col = "darkblue")
+```
+
+# Create DigitalGeneExpression (DGE) data for further analysis
+```{r DGE1}
+#' ## create DGE data
+countDGE <- DGEList(counts = as.matrix(counts[,3:ncol(counts)]), genes = counts[,1:2], remove.zeros = FALSE)
+print(dim(countDGE))
+countDGE$counts[1:5,1:5]
+head(countDGE$samples)
+head(countDGE$genes)
+```
+
+## extend sample information
+```{r DGE2}
+### add sample ids
+sampleIDs = sapply(rownames(countDGE$samples), function(x){
+  paste("TCGA", strsplit(x, split="-")[[1]][2], strsplit(x, split="-")[[1]][3],
+        strsplit(x, split="-")[[1]][4], sep = "-")
+})
+sampleIDs <- str_sub(sampleIDs, end=-2)
+countDGE$samples$sampleIDs <- as.factor(sampleIDs)
+
+### add tumour/normal information
+countDGE$samples$sample = str_sub(countDGE$samples$sampleIDs, start = -2)
+## exchange sample number with written explanation
+countDGE$samples$sample[countDGE$samples$sample == "01"] = "Tumor" #"PrimarySolidTumor"
+countDGE$samples$sample[countDGE$samples$sample == "11"] = "Normal" #"SolidTissueNormal"
+
+### add plate
+countDGE$samples$plate <- sapply(rownames(countDGE$samples), function(x){strsplit(x, split="-")[[1]][6]})
+
+### add other relevant factors
+head(countDGE$samples)
+countDGE$samples <- make1col(countDGE$samples)
+colnames(countDGE$samples)[1] <-"ids_mRNA"
+# countDGE$samples$id_samp <- str_sub(countDGE$samples$ids_mRNA, start = 1, end = 19)
+countDGE$samples <- join(countDGE$samples, confounders[,c("ids_mRNA", "subtype_mRNA", "gender", "birth_year", "purity", "tumor_stage")], type = "left")
+countDGE$samples[duplicated(countDGE$samples$ids_mRNA)|duplicated(countDGE$samples$ids_mRNA, fromLast=TRUE),]
+countDGE$samples <- makeRn(countDGE$samples)
+
+### extend gene information
+countDGE$genes$ids <- sapply(countDGE$genes$id, function(x){strsplit(x, split="[.]")[[1]][1]})
+```
+
+# CPM calculations and filtering
+```{r CPMCalc}
+## CPM calculations and filtering -----
+cpm <- cpm(countDGE)
+lcpm <- cpm(countDGE, log=TRUE) # log2 transformation in the course of cpm calculation
+
+# plot log cpm expression
+nsamples <- ncol(countDGE)
+col <- colorRampPalette(c("#053061","#ffffbf", "#67001f"))(nsamples)
+plot(density(lcpm[,1]), col=col[1], lwd=2, ylim=c(0,1), las=2, main="", xlab="")
+title(main="Raw data", xlab="Log-cpm")
+for (i in 2:nsamples){
+  den <- density(lcpm[,i])
+  lines(den$x, den$y, col=col[i], lwd=2)
+}
+
+### remove lowly expressed genes
+keep.exprs <- rowSums(cpm>1) >= ncol(countDGE$counts)/2
+countDGE <- countDGE[keep.exprs,, keep.lib.sizes=FALSE] # keep lib sizes states if the lib.size of the $sample should be recalculated (FALSE) using the new values or not (TRUE)
+print(dim(countDGE))
+
+# plot log cpm expression after filtering of lowly expressed genes
+lcpm_n <- cpm(countDGE, log=TRUE)
+plot(density(lcpm_n[,1]), col=col[1], lwd=2, ylim=c(0,0.25), las=2, main="", xlab="")
+title(main=paste("Filtered data"), xlab="Log-cpm")
+for (k in 2:nsamples){
+  den <- density(lcpm_n[,k])
+  lines(den$x, den$y, col=col[k], lwd=2)
+}
+
+#' ### Sequencing depth after filtering
+### Sequencing depth after filtering -----
+hist(countDGE$samples$lib.size,
+     xlab= "sequencing depth", #xlim = c(-1,30), #las = 1,
+     main = "Sequencing depth after cpm filtering", col = "darkorange", 
+     cex.lab = 1.5, cex.axis= 1.5)
+```
+
+# TPM calculations
+calculations of gene lengths
+code found on Biostar: https://www.biostars.org/p/83901/ 
+First, import the GTF-file that was also used as input for htseq-count. According to the https://docs.gdc.cancer.gov/Data/Bioinformatics_Pipelines/Expression_mRNA_Pipeline/ homepage, gencode.v22 was used for annotation. Gencode annotation was downloaded from https://www.gencodegenes.org/.
+```{r TPMCalc}
+# calculate exonic gene sizes
+txdb <- makeTxDbFromGFF(file.path(gencode_dir, "gencode.v22.annotation.gtf"),format="gtf")
+# # then collect the exons per gene id
+exons.list.per.gene <- exonsBy(txdb,by="gene")
+# # then for each gene, reduce all the exons to a set of non overlapping exons, calculate their lengths (widths) and sum then
+exonic.gene.sizes <- sum(width(reduce(exons.list.per.gene)))
+exonic.gene.sizes <- make1col(as.data.frame(exonic.gene.sizes))
+names(exonic.gene.sizes)[1] <- "id"
+# fwrite(exonic.gene.sizes, sep = ";", dec = ",", file = file.path(work_dir, "exonic_gene_sizes.csv"))
+
+countDGE$genes <- join(countDGE$genes, exonic.gene.sizes, type = "left")
+tpms <- apply(countDGE$counts, 2, function(x) tpm(x, countDGE$genes$exonic.gene.sizes))
+tpms <- make1col(as.data.frame(tpms))
+begindf(tpms)
+names(countDGE$genes) <- c("ids", "hgnc_symbol", "id", "exonic.gene.sizes" )
+tpms_annot <- join(countDGE$genes[,c("ids", "hgnc_symbol")], tpms, type = "full")
+
+# fwrite(tpms, sep = ";", dec = ",", file = file.path(res_dir, paste0("TPMs_BRCA.csv")))
+# fwrite(tpms_annot, sep = ";", dec = ",", file = file.path(res_dir, paste0("TPMs_BRCA_wo_MTgenes.csv")))
+# fwrite(make1col(countDGE$samples), sep = ";", dec = ",", file = file.path(res_dir, paste0("confounder_BRCA_wo_MTgenes.csv")))
+# fwrite(countDGE$genes, sep = ";", dec = ",", file = file.path(res_dir, paste0("gene_info_BRCA_wo_MTgenes.csv")))
+```
+
+### shut diagnostic pdf
+```{r pdf_shut}
+# dev.off()
+```
+
+# Final annotation and filtering
+In this section, ENSG Ids will be removed and only HGNC symbols will be kept. Those genes, for which no HGNC symbol exists will be removed. 
+There is one patient (TCGA-A7-A0DC-01A-11R-A00Z-07) for which almost half of all reads get's lost when excluding genes without HGNC symbol (resulting in only 424423.9 reads). This seems rather unusual, therefore this patient is excluded. 
+```{r furtherFiltering}
+# use only hgnc symbols as gene identifier
+mRNA <- tpms_annot
+mRNA$ids <- NULL
+mRNA$hgnc_symbol[mRNA$hgnc_symbol == ""] <- NA # set empty cells to NA
+mRNA <- mRNA[!is.na(mRNA$hgnc_symbol), ] # remove NA rows 
+mRNA <- mRNA[!duplicated(mRNA$hgnc_symbol, fromLast = TRUE),] # there is only one gene which is duplicated: POLR2J4.The entry with higher mean expression is kept here. 
+begindf(mRNA)
+
+# > transpose mRNA data 
+mRNA <- make1col(as.data.frame(t(as.matrix(makeRn(mRNA)))))
+mRNA$ids <- gsub('\\.', '-', mRNA$ids) # change . to - to avoid matching problems in the correlations part
+
+# remove patient with crazily small row sum
+### find patient
+mRNAmean <- rowSums(as.matrix(mRNA[,2:ncol(mRNA)]))
+names(mRNAmean) <- mRNA$ids
+mRNAmean <- sort(mRNAmean)
+
+### exclude this patient
+mRNA <- mRNA[!rowSums(as.matrix(mRNA[,2:ncol(mRNA)]))<500000,]
+
+# > log2 transform data 
+mRNA_log2 <- makeRn(mRNA)
+mRNA_log2 <- log2((as.matrix(mRNA_log2) + (min(mRNA_log2[mRNA_log2 > 0]) / 10)))
+mRNA_log2 <- make1col(mRNA_log2)
+
+# > add samp.ids
+mRNA$samp.ids <- paste0(str_sub(mRNA$ids, start=1, end = 15)) # generate samp.ids to join with other samples
+mRNA <- mRNA %>% dplyr::select(c("ids", "samp.ids"), everything())  
+begindf(mRNA)
+
+mRNA_log2$samp.ids <- paste0(str_sub(mRNA_log2$ids, start=1, end = 15)) # generate samp.ids to join with other samples
+mRNA_log2 <- mRNA_log2 %>% dplyr::select(c("ids", "samp.ids"), everything())  
+begindf(mRNA_log2)
+
+
+# > check for/ remove duplicate patients 
+nrow(mRNA[duplicated(mRNA$samp.ids)|duplicated(mRNA$samp.ids, fromLast=TRUE),]) # no duplicate patients
+nrow(mRNA_log2[duplicated(mRNA_log2$samp.ids)|duplicated(mRNA_log2$samp.ids, fromLast=TRUE),]) # no duplicate patients
+
+versions <- list(mRNA, mRNA_log2)
+names(versions) <- c("mRNA", "log2 mRNA")
+
+## export final tables
+# write.xlsx(versions, file.path(database_dir, "TCGA_BRCA_mRNA_tpm__wo_mt__dup_rem__hgnc_symb_log2.xlsx"), rownames=FALSE, creator = "Birgitta", tabColour = c("red", "orange"), firstActiveRow = 2, firstActiveCol = 3, overwrite = TRUE)
+# fwrite(mRNA, file.path(res_dir, "TCGA_BRCA_mRNA_tpm__wo_mt__dup_rem__hgnc_symb.csv"), row.names=FALSE, sep = ";", dec = ",")
+# fwrite(mRNA_log2, file.path(res_dir, "TCGA_BRCA_mRNA_tpm__wo_mt__dup_rem__hgnc_symb_log2.csv"), row.names=FALSE, sep = ";", dec = ",")
+```
+
+
+# Session Info
+```{r sessionInfo}
+sessionInfo()
+```
+

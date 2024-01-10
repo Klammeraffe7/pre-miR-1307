@@ -1,0 +1,171 @@
+---
+title: "Analysis of secretome raw data for miR 1307"
+author: "Birgitta"
+date: "`r format(Sys.time(), '%d.%m.%Y')`"
+output:
+  html_document:
+  toc: true
+highlight: haddock
+editor_options: 
+  chunk_output_type: console
+---
+
+
+# libraries, working directories and functions
+```{r libs_wd_fcts, message=FALSE, warning=FALSE}
+# working directories
+conf <- list()
+conf$data_dir <- file.path(~,"raw_data")
+conf$filt_data_dir <- file.path(~, "filt_data")
+
+# libraries
+library(plyr)
+library(dplyr)
+library(data.table)
+library(matrixStats)
+library(stringr)
+library(openxlsx)
+library(eulerr)
+library(pheatmap)
+library(tidyverse)
+library(ggplot2)
+
+# functions
+## function to calculate percentages of the first and second principal component for PCA plots
+calculate_percentage <- function(pca_df, df){
+  percentage <- round((pca_df$sdev*pca_df$sdev) / sum((pca_df$sdev*pca_df$sdev)) * 100, 2)
+  percentage <- paste0( names(df), " (", as.character(percentage), "%", ")")
+  return(percentage)
+}
+```
+
+# Read data
+
+```{r ReadData}
+# input data available at PRIDE partner repository, dataset identifier PXD041087.
+# rawdat = fread(file.path(conf$data_dir, "20220502_114858_20220502_JM0636_Report.csv")) %>%
+  # as.data.frame()
+
+names(rawdat)  <- names(rawdat) %>%
+  gsub("(.\\d+. oecf3-JM0636-)(\\d\\d.+)", "\\2", .) %>% # remove prefix from all headers
+  gsub("(.*\\.?)(PG\\.)(.+)", "\\1\\3", .) %>% # remove PG from all headers
+  gsub("^01\\.raw\\.", "ctrl1_1_", .) %>%
+  gsub("^02\\.raw\\.", "ctrl1_2_", .) %>%
+  gsub("^03\\.raw\\.", "ctrl1_3_", .) %>%
+  gsub("^04\\.raw\\.", "ctrl2_1_", .) %>%
+  gsub("^05\\.raw\\.", "ctrl2_2_", .) %>%
+  gsub("^06\\.raw\\.", "ctrl2_3_", .) %>%
+  gsub("^07\\.raw\\.", "miR_3p0_1_", .) %>%
+  gsub("^08\\.raw\\.", "miR_3p0_2_", .) %>%
+  gsub("^09\\.raw\\.", "miR_3p0_3_", .) %>%
+  gsub("^10\\.raw\\.", "miR_3p1_1_", .) %>%
+  gsub("^11\\.raw\\.", "miR_3p1_2_", .) %>%
+  gsub("^12\\.raw\\.", "miR_3p1_3_", .) %>%
+  gsub("^13\\.raw\\.", "miR_5p0_1_", .) %>%
+  gsub("^14\\.raw\\.", "miR_5p0_2_", .) %>%
+  gsub("^15\\.raw\\.", "miR_5p0_3_", .)
+
+# filter data for proteins which seem trustable
+# rawdat <- rawdat %>%
+#   mutate(Precurs_sum = apply(.[,19:33], 1, sum)) %>%
+#   na.omit(.) %>%
+#   filter(Precurs_sum >=15)
+
+# head(rawdat)
+
+# clean data up
+rawdata <- rawdat %>%
+  na.omit(.) %>%
+  select(c("Genes", grep("Quantity", names(rawdat))))%>%
+  mutate(Genes = replace(Genes, Genes == "RPS17;RPS17;RPS17;;RPS17", "RPS17")) %>%
+  mutate(across(Genes, str_replace, ';;', ';')) %>%
+  mutate(Genes = replace(Genes, Genes == ";MRPL12", "MRPL12")) %>%
+  mutate(Genes = replace(Genes, Genes == ";TGM3", "TGM3")) %>%
+  mutate(Genes = replace(Genes, Genes == ";VPS4B;VPS4A", "VPS4B;VPS4A")) %>%
+  mutate(Genes = replace(Genes, Genes == ";VPS4B;VPS4A", "VPS4B;VPS4A")) %>%
+  mutate(Genes = replace(Genes, Genes == "H3-3A;H3-3A;H3-3B;H3-3B;H3-3B;H3C1;H3-3A;HIST3H3;HIST2H3A", "H3_3A")) %>%
+  mutate(Genes = replace(Genes, Genes == "SMARCA2;SMARCA4;SMARCA2;SMARCA2;SMARCA2;SMARCA2;SMARCA2;SMARCA2;SMARCA2;SMARCA2;SMARCA2;SMARCA2;SMARCA2;SMARCA2;SMARCA4;SMARCA4;SMARCA4;SMARCA4;SMARCA4;SMARCA4;SMARCA4;SMARCA4;SMARCA4;SMARCA4;SMARCA4;SMARCA4;SMARCA4;SMARCA4;SMARCA4;SMARCA2;SMARCA2;SMARCA2;SMARCA2;SMARCA2;SMARCA2;SMARCA2;SMARCA2;SMARCA4;SMARCA4;SMARCA2;SMARCA4;SMARCA4", "SMARCA2/4")) %>%
+  mutate(Genes = replace(Genes, Genes == "CAMK2G;CAMK2A;CAMK2A;CAMK2A;CAMK2A;CAMK2A;CAMK2A;CAMK2A;CAMK2D;CAMK2A;CAMK2B;CAMK2B;CAMK2D;CAMK2D;CAMK2B;CAMK2B;CAMK2G;CAMK2D;CAMK2G;CAMK2G;CAMK2A", "CAMK2G")) %>%
+  filter(Genes %!in% c("", "; ")) %>% # remove rows for genes which do not contain a gene name
+  ddply(., "Genes", numcolwise(sum)) %>%
+  `row.names<-`(., NULL) %>%
+  column_to_rownames(var = "Genes") 
+
+names(rawdata) <- gsub("(.+)(_Quantity)", "\\1", names(rawdata)) # remove _Quantity from all headers)
+
+
+# read significantly regulated genes
+datSign <- read.xlsx(file.path(conf$filt_data_dir, "JM0636_significant.xlsx")) # this file generates the data for the corresponding supplementary table in the manuscript. 
+```
+
+To re-generate graphs only, data from the supplementary table of the manuscript can be read in here as "datSign" dataframe. 
+
+# miRNA mimic quantity in each condition - Heatmap
+
+```{r heatmap}
+# create dataframe for annotation bars
+anno = data.frame('sample' = rep(c("ctrl1", "ctrl2", "miR1307 5p|0", "miR1307 3p|0", "miR1307 3p|1"),3)) %>%
+  mutate(sample = sort(sample))
+
+rownames(anno) <- names(datSign[,5:19])
+  
+# convert annotations to factors
+anno$sample <- as.factor(anno$sample)
+  
+# specify nicer annotation colors using the parameter annotation_colors in heatmap
+col = c("#000000", "#464546", "#1F8ECF", "#005485", "#3AB027")
+names(col) = unique(anno$sample)
+
+# in case more annotations are wanted, all colours for them can be combined in this list: 
+ann_colors = list(sample = col)
+
+
+
+t_datSign <- scale(t((datSign[,5:19])))
+#default pheatmap: distance: euclidean, linkage: complete
+pheatmap(t(t_datSign), #scale(log2((datSign[,5:19]))
+     # clustering_distance_cols = 'euclidean',
+     cluster_cols = FALSE, # choose if column clustering is not wanted
+     clustering_distance_rows = 'euclidean',
+     clustering_method = 'ward.D2',
+     color = colorRampPalette(c("#2668A8", "#ffffbf", "#CB0017"))(n = 299),
+     breaks = seq(-3, 3, length.out = 299),
+     annotation_col = anno,
+     # annotation_col = lala, 
+     annotation_colors = ann_colors,
+     show_rownames = FALSE,
+     show_colnames = FALSE,
+     border_color = NA#,
+     ) # remove last bracket and add comma to also run heatmap export part in next line
+     # filename = file.path(conf$filt_data_dir, paste0(format(Sys.Date(), "%Y%m%d"), "_Heatmap_signSecrProts.pdf")))
+
+# dev.off()
+```
+
+
+# Overlap between identified, downregulated proteins
+
+```{r VennDiagram}
+mi3p0_sign <- datSign[datSign$mi3p0_ctrl1_2_p < 0.05,]
+mi3p1_sign <- datSign[datSign$mi3p1_ctrl1_2_p < 0.05,]
+mi5p0_sign <- datSign[datSign$mi5p0_ctrl1_2_p < 0.05,]
+
+# pdf(file.path(conf$filt_data_dir, paste0(format(Sys.Date(), "%Y%m%d"),"_Vennn_SignSecrProts", ".pdf")), width = 7, height = 5.5)
+# plot venn diagram
+venn_reg <- euler(list(`3p|0`= unique(mi3p0_sign$PG.Genes), `3p|1`= unique(mi3p1_sign$PG.Genes), `5p|0` = unique(mi5p0_sign$PG.Genes)))
+print(plot(venn_reg, fills = "transparent", edges =c("#1F8ECF", "#005485", "#3AB027"), lwd= 5, 
+           labels = list(col = "black", fontsize = 22),
+           quantities = list(TRUE, cex = 2),
+           main = paste("miR1307")
+           ))
+# dev.off()
+
+
+```
+
+
+
+# Session Info
+```{r}
+sessionInfo()
+```

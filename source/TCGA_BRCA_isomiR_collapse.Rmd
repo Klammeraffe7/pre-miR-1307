@@ -1,0 +1,177 @@
+---
+title: "Pre-processing of TCGA-BRCA isomiR data"
+author: "Birgitta"
+date: "`r format(Sys.time(), '%d.%m.%Y')`"
+output:
+  html_document:
+  toc: true
+  highlight: haddock
+editor_options: 
+  chunk_output_type: console
+---
+
+# Data source
+Download batch corrected TCGA miR Sequencing data for BRCA and corresponding sample informatation from GEO: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE164767. 
+Downloaded, unzipped and used files: GSE164767_TCGA-BRCA_corrected_all_median15.txt.gz and TCGA_sample_information.txt.
+
+# Configuration, Libraries and Functions
+```{r configuration}
+
+# Configuration
+conf = list()
+conf$database_dir <- "~/database" 
+
+
+# Libraries
+library(plyr)
+library(dplyr)
+library(data.table)
+library(stringr)
+
+# Functions
+
+# make first column out of rownames
+make1col <- function(x) {
+  x <- cbind(rownames(x), data.frame(x, row.names = NULL))
+  colnames(x)[1] <- "ids"
+  return(x)
+}
+# make rownames out of first column
+makeRn <- function(x) {
+  rownames(x) <- x[, 1]
+  x[, 1] <- NULL
+  return(x)
+}
+
+# collapse isomiRs to arm level
+arm_collapse <- function(x){
+  x <- make1col(x)
+  x$ids <- gsub("[\\.][\\.]{0,1}.[\\.]$", "", x$ids) # remove 5'notation, neglect isomiR information completely
+  x <- ddply(as.data.frame(x), "ids", numcolwise(sum)) 
+  x$ids <- paste0(str_to_lower(x$ids))
+  x <- makeRn(x)
+}
+```
+
+
+# Collapse isomiRs to 5'isomiRs
+
+To this end, all 3' isomiRs for each 5' isomiR are summed up. Collapsed value for 5' isomiRs are reported.  
+
+```{r collapse5isomiR}
+# "TCGA-BRCA_miRNA_rpm_cor_all_median15.txt to be downloaded from GSE164767 repository
+exprs_df <- fread(file.path(conf$database_dir, "TCGA-BRCA_miRNA_rpm_cor_all_median15.txt"), data.table= FALSE) # full dataset with NA
+
+# remove unneccessary columns
+exprs_df$Project <- NULL
+exprs_df$FilterMethod <- NULL
+exprs_df$Dataset <- NULL
+exprs_df[is.na(exprs_df)] <- 0 
+
+# Neglect 3' end variants, treat all 3'isomiRs as miRNA or 5'isomiRs depending on their 5' end variation
+exprs_df$isomiR <- gsub("[|][-]{0,1}.[|]$", "|", exprs_df$isomiR) # remove 3'notation
+
+# actual collapsing, i.e. summing up all 3' reads for each 5' isomiR
+exprs_5_df <- ddply(as.data.frame(exprs_df), "isomiR", numcolwise(sum)) # colwise operates columnwise on a data frame, num: only numeric values
+rownames(exprs_5_df) <- exprs_5_df$isomiR
+exprs_5_df <- exprs_5_df[,-1] # remove "isomiR" as column
+
+# export resulting table
+# write.csv2(exprs_5_df, file.path(conf$database_dir, "TCGA-BRCA_miRNA_rpm_cor_all_median15_collapsed.csv"))
+```
+
+# Filter patients
+
+To obtain a dataset which is as clean as possible, the following filtering steps will be performed: 
+
+* remove duplicate samples of patients (keep those with higher mean expression)
+* only keep samples from solid tumour and normal tissue, not from metastatic tissue
+* exclude male samples (too few to have statistical power)
+* exclude samples with low purity (<40%)
+
+All the information needed for these filtering steps can be derived from the sample identification code (see also https://docs.gdc.cancer.gov/Encyclopedia/pages/TCGA_Barcode/) or from the TCGA sample information provided with the corrected TCGA isomiR Data (information on how to get them see in "Data source" above).
+
+```{r PatientsFiltering}
+iso <- exprs_5_df
+
+# Transpose isomiR data
+iso <- as.data.frame(t(as.matrix(iso)))
+
+# Add samp.ids (samp.ids are an abbreviated form of the sample IDs provided by TCGA)
+iso <- make1col(iso)
+names(iso)[1] <- "idents"
+iso$samp.ids <- paste0(str_sub(iso$idents, start=1, end = 15))
+
+# Remove duplicate samples of patients and keep those samples with higher mean expression:
+iso$means <- rowMeans(iso[,2:(ncol(iso)-1)])
+iso <- iso %>% dplyr::select(c("idents","samp.ids", "means"), everything())
+iso <- iso[order(iso$samp.ids, -(iso$means) ), ] # sort by ids (first) and by means going from lowest to highest(second)
+iso <- iso[ !duplicated(iso$samp.ids), ] #delete sample with lower mean expression
+iso[,"means"] <- NULL
+
+
+# Exclude metastatic samples
+iso$type <- str_sub(iso$samp.ids, start = -2)
+iso <- subset(iso, type %in% c("01", "11"))
+iso$type <- NULL
+
+# Exclude male samples & samples with low purity (<40%)
+
+confounders <- fread(file.path(conf$database_dir, "TCGA_sample_information.txt"))
+names(confounders)[1] <- "ids"
+names(iso)[1] <-  "ids"
+
+iso <- join(confounders[,c("ids", "Gender", "Purity")], iso, type = "right")
+
+iso <- subset(iso, Gender == "female")
+iso <- subset(iso, Purity >= 40 | Purity == 100 | is.na(Purity))
+iso$Gender <- NULL
+iso$Purity <- NULL
+
+```
+
+
+# Export 5'isomiR data
+```{r exportI}
+# write.xlsx(iso, file.path(conf$database_dir,"TCGA_BRCA_miRNA_rpm__cor_all_median15__collapsed__dup_rem.xlsx"), rownames=FALSE, creator = "Birgitta", tabColour = "red", firstActiveRow = 2, firstActiveCol = 3)
+# write.csv(iso, file.path(conf$database_dir, "TCGA_BRCA_miRNA_rpm__cor_all_median15__collapsed__dup_rem.csv"), row.names=FALSE)
+```
+
+# Log2 transform 5'isomiR data
+```{r log2Transform}
+iso_log2 <- makeRn(iso)
+iso_log2$samp.ids <- NULL
+iso_log2 <- log2((as.matrix(iso_log2) + (min(iso_log2[iso_log2 > 0]) / 10)))
+iso_log2 <- make1col(iso_log2)
+iso_log2$samp.ids <- paste0(str_sub(iso_log2$ids, start=1, end = 15))
+iso_log2 <- iso_log2 %>% dplyr::select(c("ids","samp.ids"), everything())
+```
+
+# Export log2 transformed 5'isomiR data
+
+```{r exportII}
+# write.xlsx(iso_log2, file.path(conf$database_dir,"TCGA_BRCA_miRNA_rpm__cor_all_median15__collapsed__dup_rem_log2.xlsx"), rownames=FALSE, creator = "Birgitta", tabColour = "red", firstActiveRow = 2, firstActiveCol = 3)
+# write.csv(iso_log2, file.path(conf$database_dir, "TCGA_BRCA_miRNA_rpm__cor_all_median15__collapsed__dup_rem_log2.csv"), row.names=FALSE)
+```
+
+# Collapse 5'isomiRs to isomiR arms
+In this step, all rpms for each isomiR arm are summed up, equivalently to the collapsing step above for the 5'isomiRs. 
+
+```{r isomiRarmCollapse}
+
+# collapse 5' isomiRs to miRNA arms
+arm_collapsed <- iso
+arm_collapsed$ids <- NULL
+arm_collapsed <- make1col(as.data.frame(t(as.matrix(makeRn(arm_collapsed)))))
+arm_collapsed <- arm_collapse(makeRn(arm_collapsed))
+# write.csv2(arm_collapsed, file.path(conf$B050Projects, "Birgitta_intragenic_miRs", "database", "TCGA_raw_data", "miRNA", "TCGA_BRCA_rpms", "TCGA_BRCA_miRNA_rpm__cor_all_median15__collapsed_to_arms__dup_rem.csv"), row.names = TRUE)
+
+
+```
+
+
+
+# Session Info
+```{r sessionInfo}
+sessionInfo()
+```

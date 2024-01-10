@@ -1,0 +1,174 @@
+---
+title: "Calculate Activity Scores for all MSigDB-hallmark genesets"
+author: "Birgitta"
+date: "`r format(Sys.time(), '%d.%m.%Y')`"
+output:
+  html_document:
+  toc: true
+highlight: haddock
+editor_options: 
+  chunk_output_type: console
+---
+# background
+Calculate activity scores for all BRCA patients based on our curated TPM-mRNA expression data.
+
+The Hallmark geneset from the Human MSigDB database was used. Version details:  v2022.1.Hs updated August 2022, Downloaded October, 5th 2022.
+
+# libraries, working directories and functions
+```{r libs_wd_fcts, message=FALSE, warning=FALSE}
+
+# working directories
+conf <- list()
+conf$database_die <- file.path(~, "database")
+conf$project_dir <- file.path(~, "activation_scores")
+
+# libraries
+library(plyr)
+library(dplyr)
+library(data.table)
+library(matrixStats)
+library(stringr)
+library(openxlsx)
+library(tibble)
+
+```
+
+
+# mRNA expression of geneset genes
+In this section, expression values for the TCGA patients will be merged to the respective genes of each geneset. Resulting tables will be exported as .csv files eventually. 
+
+```{r}
+# Input: 
+# read TCGA mRNA and confounder table from Supplementary tables of the manuscript. Only use those patients for further analysis, which are contained in the confounder table. 
+
+mRNA <- join(confounder[,c("samp.ids", "subtype_mRNA", "sample_type")], mRNAtpm, by = "samp.ids", type = "inner")
+
+## read genesets 
+# file to be downloaded from the MSigDB database
+genesets <- fread(file.path(conf$project_dir, "h.all.v2022.1.Hs.symbols.gmt"), sep = "\t", fill = TRUE, header= FALSE, data.table = FALSE) # read gmt file containing gene sets of interest here (gmt files can be downloaded from MSigDB. It's ok, to copy different lines in one file and rename it. )
+genesets$V2 <- NULL
+genesets <- as.data.frame(t(as.matrix(makeRn(genesets))))
+names(genesets) <- str_sub(names(genesets), start = 10) # the "Hallmarks" pre-fix is cut of here from all geneset names to keep names a bit shorter. Optional step. 
+
+#' ## merge Hallmark files with mRNA expression data
+## merge Hallmark files with mRNA expression data -----
+dflist <- apply(genesets, 2, function(x){
+  df <- mRNA[,(names(mRNA) %in% x | names(mRNA) %in% c("samp.ids","subtype_mRNA","sample_type",	"ids"))]
+  # df <- df%>% dplyr::select(c("ID", ), everything())
+  return(df)
+})
+
+#check if merging was successful
+begindf(dflist[[1]])
+beginlist(dflist)
+dflist[[1]][1:5,1:8]
+ncol(dflist[[1]])
+
+## export results as individual tables (needs to be performed, just as comment here to prevent problems while knitting the document)
+# setwd(file.path(conf$project_dir, "Expression_GenesetGenes"))
+# lapply(names(dflist), function(i){
+#   write.csv2(dflist[[i]], sprintf("%s.csv", paste0(i, "_expr")), row.names = FALSE)
+#   })
+
+```
+
+
+# Calculate activity score
+In this sections, the files containing the expression for each gene of the respective geneset are read in again and used to calculate the actual activity score. 
+
+```{r}
+setwd(file.path(conf$project_dir, "Expression_GenesetGenes"))
+files_exprs <- dir(pattern="_expr\\.csv$")
+
+#### BRCA subtypes
+subgroups <- c("all","Normal", "Tumour", "Basal", "LumA", "LumB", "Her2", "Normal_like")
+
+## apply to all GSEA datasets (all files which are in folder "MSigDBListen")
+act_score <- lapply(seq_along(files_exprs), function(i){
+  # print(files_exprs[i])
+  exprs <- read.csv2(files_exprs[i], stringsAsFactors = FALSE)
+  
+  ## apply to different BRCA subtypes, calculates subtype activity scores which strongly reflect the number of patients within a subtype
+  subtype_score <-lapply(seq_along(subgroups), function(k){
+    # print(subgroups[k])
+    if(subgroups[k] == "all"){
+      exprs_sub <- exprs
+      } else if (subgroups[k] == "Tumour"){
+        exprs_sub <- subset(exprs, exprs$subtype_mRNA  != "Normal")
+        } else {
+          exprs_sub <- subset(exprs ,exprs$subtype_mRNA  == subgroups[k])
+        }
+    exprs_sub[,2:4] <- NULL # remove useless annotation columns
+    exprs_sub <- makeRn(exprs_sub) # make rownames from sample ids
+    # exclude genes which have not been measured in any patient
+    exprs_sub <- exprs_sub[,colSums(exprs_sub)>0]
+    # use z-scores to calculate activation scores
+    exprs_sub_calc <- apply(exprs_sub, 2, function(x){scale(x, center = TRUE, scale = TRUE)})
+    rownames(exprs_sub_calc) <- rownames(exprs_sub)
+    # use ranks to calculate activation scores
+    # exprs_sub <- apply(exprs_sub, 2, rank)  # calculate rank for each patient for each gene -> each genes has values between 1 and number of patients
+    exprs_sub <- as.data.frame(exprs_sub_calc)
+    exprs_sub$gene_activity_score <- rowMedians(as.matrix(exprs_sub)) # calculate median rank for each patient --> = activity score
+    # exprs_sub <- exprs_sub %>% select(c("gene_activity_score"), everything())
+    exprs_sub <- make1col(exprs_sub)
+    scores <- exprs_sub[,c("ids", "gene_activity_score")] #extract score information
+    names(scores)[1] <- "samp.ids"
+    # scores$ids <- gsub("\\.", "-", scores$ids)
+    scores <- join(exprs[,c("samp.ids", "subtype_mRNA")], scores,  type = "right", by = "samp.ids")
+     
+    return(makeRn(scores))
+    
+    }) # close lapply for subtypes (all patients, basal,...)
+  headlist(subtype_score)
+  names(subtype_score) <- subgroups
+  return(subtype_score)
+  }) # close apply for list of Genesets
+
+# str(act_score)
+names(act_score) <- str_sub(files_exprs, end = -10) # the _expr.csv ending of the files is cut of here for meaningful naming of the activation scores
+
+## generate summary tables for all and tumour patients 
+### this section can be copied and adapted for the other subtypes, in case one of those is of interest. 
+
+### combine & export activation score for all samples
+all_pat <- lapply(seq_along(files_exprs), function(i){
+  subgroup <- do.call(cbind, lapply(act_score[i], `[[`, "all")) # filter for dataframes named "all" in nested list --> exchange to subtype of interest if needed. 
+    if (i < length(files_exprs)){
+      subgroup <- subgroup[,2, drop = FALSE]
+    } else if (i== length(files_exprs)){
+      names(subgroup)[1] <- str_sub(names(subgroup)[1], start = 23) # cut off the dataset name in front of the subtype_mRNA
+    }
+  return(subgroup)
+})
+all_pat <- do.call("cbind", all_pat)
+all_pat <- all_pat %>%
+  select(c("subtype_mRNA"), everything()) %>%
+  rownames_to_column("samp.ids")
+
+# export activity score table for all patients (only as comment for knitting, do perform this step otherwise)
+# fwrite(all_pat,file = file.path(conf$project_dir, "ActivationScores_AllSamp.csv"), sep = ";", dec = ",", row.names = FALSE)
+
+# combine & export activation score for tumour samples
+tumour_pat <- lapply(seq_along(files_exprs), function(i){
+  subgroup <- do.call(cbind, lapply(act_score[i], `[[`, "Tumour")) # filter for dataframes named "Tumour" in nested list
+    if (i < length(files_exprs)){
+      subgroup <- subgroup[,2, drop = FALSE]
+    } else if (i== length(files_exprs)){
+      names(subgroup)[1] <- "subtype_mRNA"
+    }
+  return(subgroup)
+})
+tumour_pat <- do.call("cbind", tumour_pat)
+tumour_pat <- tumour_pat %>%
+  select(c("subtype_mRNA"), everything()) %>%
+  rownames_to_column("samp.ids")
+
+# fwrite(tumour_pat,file = file.path(conf$project_dir, "ActivitionScores_TumourSamp.csv"), sep = ";", dec = ",", row.names = FALSE)
+
+```
+
+
+# Session Info
+```{r}
+sessionInfo()
+```

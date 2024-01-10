@@ -1,0 +1,263 @@
+---
+title: "Differential expression analysis of MDA-MB-231 w/wo overexpression of miR1307"
+author: "Birgitta"
+date: "`r format(Sys.time(), '%d.%m.%Y')`"
+output:
+  html_document:
+  toc: true
+highlight: haddock
+editor_options: 
+  chunk_output_type: console
+---
+
+# Libraries, Working Directories and functions
+```{r libs_wd_fcts, message=FALSE, warning=FALSE}
+# working directories
+conf <- list()
+conf$project_dir <- file.path(~, "P53_miRNA_mRNA_seq")
+
+# libraries
+library(plyr)
+library(dplyr)
+library(data.table)
+library(matrixStats)
+library(stringr)
+library(openxlsx)
+library(SummarizedExperiment)
+library(DESeq2)
+library(GenomicRanges)
+library(pheatmap)
+library(ggplot2)
+library(RColorBrewer)
+library(matrixStats)
+
+```
+
+## 5' isos summarised Experiment of isomiR counts
+create summarised experiment for further analysis
+```{r summarisedExperimentNEB5isos}
+# file to be downloaded from GEO repository GSE227354 or to be generated using the MDA_MB_231_Formating_miRNA_seq_counts_rpms.Rmd script.
+isos_exp <- read.xlsx(file.path(conf$project_dir, "20220204_NEB_MDAMB231_iso1307_readcts_rpms.xlsx"), sheet = "readcts_5'collapsed_sum0")
+isos_exp <- makeRn(isos_exp)
+
+# add names according to mutations
+lines <- c("ctrl1", "ctrl1", "ctrl1", "ctrl2", "ctrl2", "ctrl2", "miR1307", "miR1307", "miR1307")
+sumlines <- c("ctrl", "ctrl", "ctrl", "ctrl", "ctrl", "ctrl", "miR1307", "miR1307", "miR1307")
+
+# rowRanges <- GRanges(seqnames = Rle(isos$chr), ranges = IRanges(start = isos$start, end = isos$end), strand = Rle(isos$strand), score = isos$score1)
+
+isos_exp <- SummarizedExperiment(as.matrix(isos_exp), colData = lines)#, rowRanges = rowRanges)
+names(isos_exp@colData) <- "lines"
+isos_exp$lines <- as.factor(isos_exp$lines)
+isos_exp$sumlines <- as.factor(sumlines) 
+str(isos_exp)
+
+```
+## DESeq2 5'isos analysis
+The following comparisons are requested:
+
+* using KO as reference level:
++ miR1307_vs_KO1
++ miR1307_vs_KO2
++ miR1307_vs_allKO
+
+```{r DESeq2NEB5isos}
+ddsisos <- DESeqDataSet(isos_exp, design = ~ lines)
+ddsisos
+keep <- rowMedians(counts(ddsisos)) >= 5 # remove those isos which where found less than five times in the median of all samples --> was done above already, doesn't change anything here any more.
+ddsisos <- ddsisos[keep,]
+
+ddsisos$lines <- relevel(ddsisos$lines, ref = "ctrl1")
+
+# DESeq run
+dds <- DESeq(ddsisos)
+resultsNames(dds)
+
+# unshrunken results. 
+res1 <- results(dds, contrast=c("lines","miR1307", "ctrl1"))
+resLFC1 <- lfcShrink(dds, coef= "lines_miR1307_vs_ctrl1", type = "apeglm")
+
+# relevel to do other comparison
+dds$lines <- relevel(dds$lines, ref = "ctrl2")  
+dds <- nbinomWaldTest(dds)
+resultsNames(dds)
+res2 <- results(dds, contrast=c("lines","miR1307", "ctrl2"))
+resLFC2 <- lfcShrink(dds, coef= "lines_miR1307_vs_ctrl2", type = "apeglm")
+
+# relevel to do other comparison
+dds$lines <- relevel(dds$sumlines, ref = "ctrl")  
+dds <- nbinomWaldTest(dds)
+resultsNames(dds)
+
+res3 <- results(dds, contrast=c("lines","miR1307", "ctrl"))
+resLFC3 <- lfcShrink(dds, coef= "lines_miR1307_vs_ctrl", type = "apeglm")
+
+res_list <- list(resLFC1, resLFC2, resLFC3,  
+                 res1, res2,res3)
+names(res_list) <- rep(c("miR1307_vs_ctrl1", 
+                     "miR1307_vs_ctrl2",
+                     "miR1307_vs_ctrl"),2)
+
+#'## prepare results table
+### prepare results table -----
+res_table <- lapply(res_list, function(df){
+        df <- as.data.frame(df)
+        make1col(df)
+})
+
+# use log2FC, padj etc from the aplegm derived analysis and only add stats column from the old one 
+for (i in seq_along(res_table)[1:(length(res_list)/2)]){ 
+        print(dim(res_table[[i]]))
+        unshr_res_table <- res_table[[i+(length(res_list)/2)]] # aim: get the stats column from the unshrunken values in the res table
+        print(dim(unshr_res_table))
+        res_table[[i]] <- join(res_table[[i]], unshr_res_table[,c("ids", "stat")], type = "full")
+        print(dim(res_table[[i]]))
+        col_names <- c("ids", paste0(colnames(res_table[[i]][2:7]), "_", names(res_table)[[i]]))
+        colnames(res_table[[i]]) <- col_names
+        res_table[[i]] <- res_table[[i]][,c(1:4,7,5:6)]
+}
+
+res_table <- res_table[-c((length(res_list)/2+1):(length(res_list)))] # remove non-LFC results
+beginlist(res_table)
+res_table <- Reduce(merge_dfs, res_table) 
+
+#add read count information
+counts <- make1col(as.data.frame(counts(dds)))
+
+AllResults<- join(counts,res_table, type = "full")
+
+filename = "miR1307_vs_wt"
+
+write.xlsx(AllResults,file.path(conf$project_dir, paste0(format(Sys.Date(), "%Y%m%d"),"_", filename,"_5iso_DESeq2.xlsx")), row.names = FALSE, creator = "Birgitta", tabColour = c("green"), firstActiveRow = 2, firstActiveCol = 2, overwrite = TRUE)
+
+```
+
+## DESeq2  5'isos diagnostic graphs
+```{r DiagnosticDeSeqNEB5isos}
+filename = "miR1307_vs_wt"
+## MA plots
+# pdf(file.path(res_dir, paste0(format(Sys.Date(), "%Y%m%d"), "_", filename,"_MA",".pdf")))
+par(mai=c(1,1,1,0.5))
+lapply(seq_along(res_list[1:(length(res_list)/2)]), function(i){
+        plotMA(res_list[[i]],
+               main= names(res_list[i]),
+               colNonSig="gray65",
+               colSig= "red3",
+               ylab= "log2 Fold Change",
+               cex.lab = 2,
+               cex.axis=2,
+               ylim=c(-2,2),
+               # xaxt="n",
+               # yaxt="n",
+               colLine=NULL)
+        # ticks <- seq(-2, 5, by=1)
+        # labels <- sapply(ticks, function(i) as.expression(bquote(10^ .(i))))
+        # axis(1, at=c(0.01, 0.1, 1, 10, 100, 1000, 10000, 100000), labels=labels, cex.axis=2)
+        # axis(2, at= c(-5,-4,-3,-2,-1,0,1,2,3,4, 5), las = 1, cex.axis=2)
+        abline(h=0, col= "black")
+})
+# dev.off()
+
+
+# Variance stabilising Transformations
+vst_isos <- vst(dds, nsub= 500, blind = TRUE) # nsub chosen very low to make the function working
+
+
+# get the most variant genes
+rv = rowVars(assay(vst_isos)) # estimate row variance
+sel = order(rv, decreasing = TRUE)[1:50] # taking only the top 200 variant genes leads to 80% variance covered by the first 3 components
+vst_var = vst_isos[sel,]
+vst_var
+
+
+## Gene Clustering -----
+# pdf(file.path(res_dir, paste0(format(Sys.Date(), "%Y%m%d"),"_",filename, "_GeneClustering_all", ".pdf")))
+sampledist<- dist(t(assay(vst_isos)))
+sampleDistMatrix <- as.matrix( sampledist )
+rownames(sampleDistMatrix) <- colnames(assay(vst_isos)) 
+colnames(sampleDistMatrix) <- colnames(assay(vst_isos)) 
+colnames(sampleDistMatrix)
+
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+
+annot <- colData(dds)$lines
+names(annot)<- rownames(colData(dds))
+annot <- as.data.frame(annot)
+
+col <- c(rep("#023858", 3),rep("#fc4e2a", 3), rep("#feb24c",3))
+names(col) <- vst_isos$lines
+ann_colors = list(annot = col)
+
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampledist,
+         clustering_distance_cols=sampledist,
+         col=colors,
+         annotation_row= annot,
+         annotation_col= annot,
+         annotation_colors = ann_colors,
+         main= filename)
+# dev.off()
+
+
+## Principal component analysis -----
+pcaRes <- prcomp(t(assay(vst_var)), center = TRUE, scale.= FALSE)
+summary(pcaRes)
+
+plotPCA(vst_var, intgroup = c("lines"))
+
+(pcaData <-plotPCA(vst_var, intgroup = c("lines"), returnData=TRUE))
+head(attr(pcaData, "percentVar"))
+
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+# col <- c( rep("darkorange2", 3),rep("darkgoldenrod2", 3), rep("lightskyblue3",3),rep("darkgreen",3), rep("darkolivegreen3",3), rep("darkblue",3))
+names(col) <- pcaData$lines
+
+
+# 
+# shapes <- c(rep(4,2), rep(15,3), rep(17,3), rep(16,3),rep(18,3))
+# names(shapes) <- c(rep("wt",2), rep("R175H",3), rep("R248Q",3), rep("R273H",3), rep("KO",3))
+
+# pdf(file.path(conf$project_dir, "miRNAseq", "rpms_DESeq_results", paste0(format(Sys.Date(), "%Y%m%d"),"_", filename, "_PCA_2D_Top50Var", ".pdf")))
+# for whatever reason, the legend for the shape does not want to be plotted. Therefore it was added in inkscape by hand. 
+ggplot(pcaData, aes(PC1, PC2, color = procssing_score, shape=lines)) + 
+  geom_point(size=8,  show.legend = TRUE) #+guides(shape=TRUE)+
+  theme_bw(base_size = 22)+
+  theme(legend.title=element_blank())+
+  theme(axis.text = element_text(size=22))+
+  # scale_color_gradient2(low= "blue", mid = "orange", high = "darkred", midpoint= -0.1) +
+  # geom_text(label = pcaData$name, color= col, hjust=-0.3,vjust=0.3)+
+  # theme_bw(base_size= 44)+
+  # ylim(-12,8)+ xlim(-12,8)+
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) +
+  coord_fixed()
+  # ggtitle(paste0(filename))
+# dev.off()
+
+## Heatmap -----
+#default pheatmap: distance: euclidean, linkage: complete
+anno = data.frame('condition' = paste(pcaData$lines))#(str_sub(colnames(assay(vst_var)), end = -2)))
+                  # 'siRNA' = (gsub("^([A-z]{6}\\d?)_{1}[a-z]*[A-z]{4}\\d{1}$", "\\1", colnames(assay(vst_var)))))
+                  
+rownames(anno) = colnames(assay(vst_var))
+
+# specify nicer annotation colors using parameter annotation_colors
+names(col) = anno$condition
+ann_colors = list(condition = col)
+
+heat<- pheatmap(assay(vst_var), 
+         clustering_distance_cols = 'euclidean', 
+         clustering_distance_rows = 'euclidean', 
+         clustering_method = 'ward.D2', 
+         annotation_col = anno,
+         annotation_colors = ann_colors,
+         color = colorRampPalette(c("#2668A8", "#ffffbf", "#CB0017"))(n = 299), 
+         # show_rownames = FALSE, 
+         show_colnames = FALSE,
+         # cutree_cols = 5,
+         main = "Euclidean dist, average linkage")#,
+         # filename = file.path(conf$project_dir, "miRNAseq", "rpms_DESeq_results", paste0(format(Sys.Date(), "%Y%m%d"),"_",filename, "_Heatmap_Top50Var", ".pdf")))
+print(heat)
+# dev.off()
+```
