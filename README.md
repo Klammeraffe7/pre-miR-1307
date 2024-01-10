@@ -3,7 +3,7 @@
 Repository to reproduce analyses from "Selective arm-usage of pre-miR-1307 dysregulates angiogenesis and contributes to breast cancer aggressiveness". Code can be found in the /source folder, input data are in the supplementary tables of the paper or need to be downloaded from other repositories as mentioned in the respective script.
 
 ## Author affiliations
-Oyku Ece Sumer<sup>1,2,#</sup>, Korbinian Schelzig^<sup>1,2,#</sup>, Janine Jung<sup>1,2</sup>, Xiaoya Li<sup>1,3</sup>, Janina Moros<sup>1,4</sup>, Luisa Schwarzmüller<sup>1,2</sup>, Ezgi Sen<sup>1,2</sup>, Sabine Karolus<sup>1</sup>, Angelika Wörner<sup>1</sup>, Nishanth Belugali Nataraj<sup>5</sup>, Efstathios-Iason Vlachavas<sup>1</sup>, Clarissa Gerhäuser<sup>6</sup>, Karin Müller-Decker<sup>7</sup>, Dominic Helm<sup>8</sup>, Yosef Yarden<sup>5</sup>, Birgitta E. Michels<sup>1</sup> and Cindy Körner<sup>1,*</sup>
+Oyku Ece Sumer<sup>1,2,#</sup>, Korbinian Schelzig<sup>1,2,#</sup>, Janine Jung<sup>1,2</sup>, Xiaoya Li<sup>1,3</sup>, Janina Moros<sup>1,4</sup>, Luisa Schwarzmüller<sup>1,2</sup>, Ezgi Sen<sup>1,2</sup>, Sabine Karolus<sup>1</sup>, Angelika Wörner<sup>1</sup>, Nishanth Belugali Nataraj<sup>5</sup>, Efstathios-Iason Vlachavas<sup>1</sup>, Clarissa Gerhäuser<sup>6</sup>, Karin Müller-Decker<sup>7</sup>, Dominic Helm<sup>8</sup>, Yosef Yarden<sup>5</sup>, Birgitta E. Michels<sup>1</sup> and Cindy Körner<sup>1,*</sup>
 
 <sup>1</sup>	Division of Molecular Genome Analysis, German Cancer Research Center (DKFZ), Im Neuenheimer Feld 580, 69120 Heidelberg, Germany
 
