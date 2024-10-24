@@ -33,7 +33,7 @@ mir_rpms_median15%>%
   scale_fill_manual(values = c("#F7F7F7","#969696"))+
   theme_bw()+
   theme(plot.title = element_text(hjust = .5),  
-        panel.grid.major.x  = element_blank(), 
+        panel.grid  = element_blank(), 
         panel.border = element_blank(),
         axis.line = element_line(color = "black"),
         text = element_text(size = 30, color = "black"),
@@ -128,6 +128,7 @@ mir_rpms_median15%>%
   ylab("log2(rpm) miR-1307-5p")+
   theme(plot.title = element_text(hjust = .5),
         panel.border = element_blank(),
+        panel.grid = element_blank(),
         axis.line = element_line(color = "black"),
         text = element_text(size = 30, color = "black"),
         axis.text = element_text(colour = "black", face = "bold"))+
@@ -169,8 +170,9 @@ mir_rpms_median15%>%
   geom_boxplot(width = .1)+
   theme_bw()+
   theme(plot.title = element_text(hjust = .5),  
-        panel.grid.major.x = element_blank(), 
+        panel.grid = element_blank(), 
         panel.border = element_blank(),
+        strip.background = element_blank(),
         axis.line = element_line(color = "black"),
         text = element_text(size = 30, color = "black"),
         axis.text = element_text(colour = "black", face = "bold"),
@@ -217,7 +219,7 @@ mir_rpms_median15%>%
   geom_boxplot(width = .1)+
   theme_bw()+
   theme(plot.title = element_text(hjust = .5),  
-        panel.grid.major.x = element_blank(), 
+        panel.grid = element_blank(), 
         panel.border = element_blank(),
         axis.line = element_line(color = "black"),
         text = element_text(size = 30, color = "black"),
